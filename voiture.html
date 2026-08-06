@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Planning Voiture — CDES</title>
+<link rel="manifest" href="voiture.webmanifest">
+<meta name="theme-color" content="#17232e">
+<link rel="apple-touch-icon" href="iconvoiture192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Planning Voiture">
+<style>
+  body {
+    margin: 0; font-family: Arial, "Segoe UI", Helvetica, sans-serif;
+    background: linear-gradient(180deg, #17232e 0%, #133654 100%);
+    color: #fff; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px; padding: 28px; text-align: center; box-sizing: border-box;
+  }
+  .car { font-size: 64px; }
+  h1 { margin: 0; font-size: 22px; }
+  h1 small { display: block; font-size: 12px; letter-spacing: 2.5px; color: rgb(116, 204, 239); text-transform: uppercase; margin-top: 6px; }
+  p { color: #cfe7f5; font-size: 14.5px; line-height: 1.6; max-width: 480px; margin: 0; }
+  p b { color: #fff; }
+  .btn {
+    display: inline-block; background: #2196F3; color: #fff; text-decoration: none;
+    font-weight: bold; font-size: 16px; padding: 15px 28px; border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(33, 150, 243, .4);
+  }
+  .etapes {
+    background: rgba(255,255,255,.08); border: 1px solid rgba(116,204,239,.35);
+    border-radius: 12px; padding: 14px 18px; font-size: 13.5px; color: #cfe7f5;
+    max-width: 480px; text-align: left; line-height: 1.7;
+  }
+</style>
+</head>
+<body>
+  <div class="car">🚗</div>
+  <h1>Planning Voiture<small>Mode mains libres — CDES</small></h1>
+  <p>Cette page sert à installer l'appli <b>Planning Voiture</b> : une icône qui ouvre directement l'écoute vocale mains libres.</p>
+  <div class="etapes">
+    <b>Installation (une seule fois) :</b><br>
+    1. Menu Chrome ⋮ (en haut à droite)<br>
+    2. « <b>Installer l'application</b> »<br>
+    3. C'est tout ! Ensuite : <b>« Hey Google, ouvre Planning Voiture »</b> → l'écoute démarre toute seule.
+  </div>
+  <a class="btn" href="./?voiture=1">🎙 Ouvrir le mode voiture maintenant</a>
+</body>
+</html>
