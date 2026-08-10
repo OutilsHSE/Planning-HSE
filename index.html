@@ -1349,6 +1349,117 @@ function fmtMoyen(d) { return d.getDate() + ' ' + MOIS_S[d.getMonth()] + (d.getF
 function uid() { return 'x' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+/* ------------------------- Intégrité de l'état -------------------------
+   Tout état qui ENTRE dans l'appli (localStorage, Sheet, import .json) passe
+   par sanitiserEtat() : couleurs, heures, ids, liens et photos sont validés
+   pour qu'aucun contenu venu de l'extérieur ne puisse injecter du HTML/JS. */
+function sainCouleur(c) { return (typeof c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(c)) ? c : '#455a64'; }
+function sainHeure(h) { if (typeof h !== 'string') return h == null ? h : ''; const m = h.match(/^(\d{1,2})[:hH](\d{2})$/); return m ? (m[1].padStart(2, '0') + ':' + m[2]) : ''; }
+function sainId(id) { return String(id == null ? '' : id).replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 64); }
+function sainImg(d) { return (typeof d === 'string' && /^data:image\//.test(d)) ? d : ''; }
+function sanitiserEtat(s) {
+  if (!s || typeof s !== 'object') return s;
+  ['projets', 'actions', 'archives', 'reunions'].forEach(k => { if (!Array.isArray(s[k])) s[k] = []; });
+  s.projets.forEach(p => { p.id = sainId(p.id); p.couleur = sainCouleur(p.couleur); if (p.lien) p.lien = normaliserLien(p.lien); });
+  s.actions.concat(s.archives).forEach(a => {
+    a.id = sainId(a.id);
+    if (a.projetId) a.projetId = sainId(a.projetId);
+    if (a.heure != null) a.heure = sainHeure(a.heure);
+    if (a.lien) a.lien = normaliserLien(a.lien);
+  });
+  s.reunions.forEach(r => {
+    r.id = sainId(r.id);
+    if (Array.isArray(r.photos)) { r.photos.forEach(ph => { ph.id = sainId(ph.id); ph.data = sainImg(ph.data); }); r.photos = r.photos.filter(ph => ph.data); }
+    (r.docs || []).forEach(dc => { if (dc.url) dc.url = normaliserLien(dc.url); });
+  });
+  if (!Array.isArray(s.suppr)) s.suppr = [];
+  return s;
+}
+
+/* ------------------------- Fusion de synchro -------------------------
+   Fin du « dernier écrit gagne » : chaque élément (action, projet, réunion,
+   archive) porte sa propre date de modification `maj`, posée automatiquement
+   par stamperModifs() à chaque sauvegarde (comparaison avec le cliché
+   précédent). Les suppressions laissent une « pierre tombale » dans
+   state.suppr pour ne pas ressusciter à la fusion. À la synchro, on FUSIONNE
+   élément par élément : le plus récent gagne, personne ne perd son travail. */
+let snapMaj = {};   // id → contenu JSON (hors maj) à la dernière sauvegarde
+function jsonSans(it) { const c = Object.assign({}, it); delete c.maj; return JSON.stringify(c); }
+function tousItems(s) { return [].concat(s.actions || [], s.archives || [], s.projets || [], s.reunions || []); }
+function initSnap() { snapMaj = {}; tousItems(state).forEach(it => { if (it.id) snapMaj[it.id] = jsonSans(it); }); }
+function stamperModifs() {
+  const now = new Date().toISOString();
+  const vus = {};
+  tousItems(state).forEach(it => {
+    if (!it.id) return;
+    vus[it.id] = 1;
+    const j = jsonSans(it);
+    if (snapMaj[it.id] !== j) { it.maj = now; snapMaj[it.id] = j; }
+  });
+  if (!Array.isArray(state.suppr)) state.suppr = [];
+  Object.keys(snapMaj).forEach(id => {
+    if (!vus[id]) { delete snapMaj[id]; if (!state.suppr.some(t => t.id === id)) state.suppr.push({ id: id, t: now }); }
+  });
+  const limite = new Date(Date.now() - 90 * 86400000).toISOString(); // tombales gardées 90 j
+  state.suppr = state.suppr.filter(t => t.t > limite);
+}
+function fusionnerEtats(loc, dist) {
+  sanitiserEtat(dist);
+  const majDefaut = dist.updatedAt || '1970-01-01T00:00:00.000Z';
+  tousItems(dist).forEach(it => { if (!it.maj) it.maj = majDefaut; });
+  tousItems(loc).forEach(it => { if (!it.maj) it.maj = loc.updatedAt || majDefaut; });
+  // union des pierres tombales (la plus récente par id)
+  const suppr = {};
+  (dist.suppr || []).concat(loc.suppr || []).forEach(t => { if (!suppr[t.id] || t.t > suppr[t.id]) suppr[t.id] = t.t; });
+  let apporteLocal = false, apporteDistant = false;
+  const fusionPool = (paires) => {
+    // paires = [{item, lieu, origine:'loc'|'dist'}] ; le plus récent gagne (et décide du lieu)
+    const gagnants = {};
+    paires.forEach(e => {
+      const g = gagnants[e.item.id];
+      if (!g || e.item.maj > g.item.maj) gagnants[e.item.id] = e;
+    });
+    const res = {};
+    Object.keys(gagnants).forEach(id => {
+      const e = gagnants[id];
+      if (suppr[id] && suppr[id] >= e.item.maj) { // supprimé après sa dernière modif → reste supprimé
+        if (e.origine === 'dist') apporteLocal = true; // le distant l'a encore → notre push l'enlèvera
+        return;
+      }
+      (res[e.lieu] = res[e.lieu] || []).push(e.item);
+      const autre = paires.find(p => p.item.id === id && p.origine !== e.origine);
+      if (!autre || autre.item.maj < e.item.maj || autre.lieu !== e.lieu) {
+        if (e.origine === 'loc') apporteLocal = true; else apporteDistant = true;
+      }
+    });
+    return res;
+  };
+  const pAct = [];
+  (loc.actions || []).forEach(a => pAct.push({ item: a, lieu: 'actions', origine: 'loc' }));
+  (loc.archives || []).forEach(a => pAct.push({ item: a, lieu: 'archives', origine: 'loc' }));
+  (dist.actions || []).forEach(a => pAct.push({ item: a, lieu: 'actions', origine: 'dist' }));
+  (dist.archives || []).forEach(a => pAct.push({ item: a, lieu: 'archives', origine: 'dist' }));
+  const rAct = fusionPool(pAct);
+  const pProj = [];
+  (loc.projets || []).forEach(p => pProj.push({ item: p, lieu: 'projets', origine: 'loc' }));
+  (dist.projets || []).forEach(p => pProj.push({ item: p, lieu: 'projets', origine: 'dist' }));
+  const rProj = fusionPool(pProj);
+  const pReu = [];
+  (loc.reunions || []).forEach(r => pReu.push({ item: r, lieu: 'reunions', origine: 'loc' }));
+  (dist.reunions || []).forEach(r => pReu.push({ item: r, lieu: 'reunions', origine: 'dist' }));
+  const rReu = fusionPool(pReu);
+  const res = {
+    version: 1,
+    updatedAt: (loc.updatedAt && dist.updatedAt) ? (loc.updatedAt > dist.updatedAt ? loc.updatedAt : dist.updatedAt) : (loc.updatedAt || dist.updatedAt),
+    actions: rAct.actions || [], archives: rAct.archives || [],
+    projets: rProj.projets || [], reunions: rReu.reunions || [],
+    suppr: Object.keys(suppr).map(id => ({ id: id, t: suppr[id] }))
+  };
+  res._apporteLocal = apporteLocal;     // la fusion contient des choses que le distant n'a pas → pousser
+  res._apporteDistant = apporteDistant; // la fusion a reçu du nouveau depuis le distant → informer
+  return res;
+}
+
 /* ------------------------- Accès données ------------------------- */
 function getProjet(id) { return state.projets.find(p => p.id === id) || null; }
 function projColor(id) { const p = getProjet(id); return p ? p.couleur : '#90a4ae'; }
@@ -1394,6 +1505,7 @@ function toastCore(msg, err, btnLabel, cb) {
 
 /* ------------------------- Stockage local ------------------------- */
 function saveLocal(silent) {
+  stamperModifs(); // pose la date `maj` sur chaque élément modifié + pierres tombales des supprimés
   state.updatedAt = new Date().toISOString();
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
@@ -1408,7 +1520,7 @@ function saveLocal(silent) {
 function loadLocal() {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (raw) { const s = JSON.parse(raw); if (s && Array.isArray(s.projets) && Array.isArray(s.actions)) { state = s; if (!Array.isArray(state.archives)) state.archives = []; } }
+    if (raw) { const s = JSON.parse(raw); if (s && Array.isArray(s.projets) && Array.isArray(s.actions)) { state = sanitiserEtat(s); if (!Array.isArray(state.archives)) state.archives = []; } }
     dirReunions(); // Réunions : structures créées / migrées si besoin
     const rawUi = localStorage.getItem(LS_UI);
     if (rawUi) { const u = JSON.parse(rawUi); Object.assign(ui, u); }
@@ -1455,22 +1567,33 @@ async function syncPull(manual) {
     const r = await fetch(SYNC_ENDPOINT + '?action=load');
     const j = await r.json();
     if (j && j.ok) {
-      if (j.state && j.state.updatedAt && (!state.updatedAt || j.state.updatedAt > state.updatedAt)) {
-        state = j.state;
-        if (!Array.isArray(state.archives)) state.archives = [];
-        archiverTerminees();
+      const distant = j.state;
+      const distantVide = !distant || (!(distant.actions || []).length && !(distant.projets || []).length && !(distant.reunions || []).length && !(distant.archives || []).length);
+      if (!distantVide) {
+        // FUSION élément par élément : le plus récent gagne, rien ne s'écrase en bloc
+        const fusion = fusionnerEtats(state, distant);
+        const apporteLocal = fusion._apporteLocal, apporteDistant = fusion._apporteDistant;
+        delete fusion._apporteLocal; delete fusion._apporteDistant;
+        state = fusion;
+        dirReunions();
+        initSnap(); // nouveau point de référence : l'état fusionné
+        archiverTerminees(); // l'archivage se fait APRÈS la fusion, jamais sur un état périmé
         try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
         renderAll();
-        toast('Planning récupéré depuis Google Sheets ☁');
-        setSyncChip('ok', 'Synchronisé à ' + new Date().toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'}));
+        if (apporteDistant) toast('Planning mis à jour depuis Google Sheets ☁ (fusion sans perte)');
+        if (apporteLocal) await syncPush(); // le distant lui manque des choses → on complète
+        else setSyncChip('ok', 'Synchronisé à ' + new Date().toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'}));
+        if (manual && !apporteDistant && !apporteLocal) toast('Déjà à jour ✓');
       } else {
-        // local plus récent (ou distant vide) → on pousse
+        // distant vide → on pousse le local
+        archiverTerminees();
         await syncPush();
         if (manual) toast('Données locales envoyées vers Google Sheets ☁');
       }
     } else throw new Error('réponse invalide');
   } catch (e) {
     setSyncChip('err', 'Synchro impossible');
+    archiverTerminees(); // même hors ligne, l'archivage local reste fait (poussé au retour du réseau)
     if (manual) toast('Impossible de joindre Google Sheets. Vérifie l\'URL et le déploiement du Web App.', true);
   }
 }
@@ -1957,7 +2080,7 @@ function wireRows(body) {
           if (!etaitTermine) a.dateTermine = ymd(today0());
           const n = !etaitTermine ? genererOccurrenceSuivante(a) : null;
           toast('✅ « ' + a.titre + ' » terminée' + (n ? ' · ↻ prochaine le ' + fmtMoyen(parseD(n.debut)) : ''));
-        } else { delete a.dateTermine; toast('Statut mis à jour'); }
+        } else { delete a.dateTermine; if (etaitTermine) annulerOccurrenceSiRouverte(a); toast('Statut mis à jour'); }
         saveLocal();
       }
     });
@@ -2381,10 +2504,25 @@ function genererOccurrenceSuivante(a) {
   if (a.fin) n.fin = decalerDate(a.fin, a.recurrence);
   delete n.outlookUid;
   delete n.dateTermine;
+  delete n.recurrenceAvant;
   if (n.versPA) n.paDepuis = ymd(today0()); // nouvelle occurrence = nouvelle ligne au PA, datée d'aujourd'hui
-  a.recurrence = null; // portée désormais par la nouvelle occurrence
+  n.occurrenceDe = a.id;        // trace : permet d'annuler proprement un « Terminé » par erreur
+  a.recurrenceAvant = a.recurrence; // mémorisée pour pouvoir la restaurer
+  a.recurrence = null;          // portée désormais par la nouvelle occurrence
   state.actions.push(n);
   return n;
+}
+
+/* Fausse manip : une action récurrente marquée « Terminé » puis rouverte.
+   On retire l'occurrence future générée (si personne n'y a touché) et on
+   redonne sa récurrence à l'action rouverte — plus de doublon fantôme. */
+function annulerOccurrenceSiRouverte(a) {
+  if (!a || !a.recurrenceAvant) return;
+  const i = state.actions.findIndex(x => x.occurrenceDe === a.id && x.statut === 'afaire' && !(x.avancement > 0));
+  if (i >= 0) state.actions.splice(i, 1);
+  a.recurrence = a.recurrenceAvant;
+  delete a.recurrenceAvant;
+  if (i >= 0) toast('↻ Récurrence restaurée — l\'occurrence future créée par erreur a été retirée');
 }
 
 /* ------------------------- MODALE ACTION ------------------------- */
@@ -2481,8 +2619,16 @@ function saveActionModal() {
   if (data.statut === 'termine') data.avancement = 100;
 
   let actionFinale, etaitTermine = false;
-  if (maId) {
-    const a = state.actions.find(x => x.id === maId);
+  const aExistante = maId ? state.actions.find(x => x.id === maId) : null;
+  if (maId && !aExistante) {
+    // l'action a disparu pendant l'édition (synchro ou archivage) : on recrée au lieu de planter
+    data.id = uid();
+    data.creeLe = ymd(today0());
+    state.actions.push(data);
+    actionFinale = data;
+    toast('⚠ L\'action avait disparu entre-temps (synchro) — elle a été recréée avec tes modifications');
+  } else if (maId) {
+    const a = aExistante;
     etaitTermine = a.statut === 'termine';
     Object.assign(a, data);
     actionFinale = a;
@@ -2504,6 +2650,7 @@ function saveActionModal() {
     if (n) toast('✅ Terminée · ↻ prochaine occurrence le ' + fmtMoyen(parseD(n.debut)));
   } else if (actionFinale.statut !== 'termine') {
     delete actionFinale.dateTermine;
+    if (etaitTermine) annulerOccurrenceSiRouverte(actionFinale);
   }
   closeModals();
   saveLocal();
@@ -2993,9 +3140,9 @@ function applyOp(op) {
       if (ch.statut === 'termine') {
         a.avancement = 100;
         if (!etaitT) { a.dateTermine = ymd(today0()); genererOccurrenceSuivante(a); }
-      } else delete a.dateTermine;
+      } else { delete a.dateTermine; if (etaitT) annulerOccurrenceSiRouverte(a); }
     }
-    if (typeof ch.avancement === 'number') { a.avancement = Math.max(0, Math.min(100, Math.round(ch.avancement))); if (a.avancement < 100 && a.statut === 'termine') a.statut = 'encours'; }
+    if (typeof ch.avancement === 'number') { a.avancement = Math.max(0, Math.min(100, Math.round(ch.avancement))); if (a.avancement < 100 && a.statut === 'termine') { a.statut = 'encours'; delete a.dateTermine; annulerOccurrenceSiRouverte(a); } }
     if (typeof ch.notes === 'string') a.notes = ch.notes.trim();
     return true;
   }
@@ -3556,8 +3703,11 @@ function importJson(file) {
       const s = JSON.parse(reader.result);
       if (!s || !Array.isArray(s.projets) || !Array.isArray(s.actions)) throw new Error('format');
       if (!confirm('REMPLACER tout le planning par ce fichier ?\n\nTes ' + state.actions.length + ' action(s) actuelles seront perdues.\n\nPour AJOUTER sans rien écraser, annule et utilise « Ajouter un lot d\'actions ».')) return;
+      if (!Array.isArray(s.archives) || !s.archives.length) s.archives = state.archives || []; // les archives ne se perdent pas dans un remplacement
+      sanitiserEtat(s);
       state = s;
       dirReunions();
+      initSnap();
       saveLocal();
       toast('Planning importé 📂 (' + s.projets.length + ' projets, ' + s.actions.length + ' actions)');
     } catch (e) {
@@ -3610,7 +3760,7 @@ function fusionnerJson(file) {
       if (!p || !p.nom) return;
       let ex = state.projets.find(x => norm(x.nom) === norm(p.nom));
       if (!ex) {
-        ex = { id: uid(), nom: String(p.nom).trim(), couleur: p.couleur || PALETTE[state.projets.length % PALETTE.length], desc: p.desc || '' };
+        ex = { id: uid(), nom: String(p.nom).trim(), couleur: sainCouleur(p.couleur || PALETTE[state.projets.length % PALETTE.length]), desc: p.desc || '' };
         state.projets.push(ex); nP++;
       }
       if (p.dossierFond) { ex.dossierFond = true; ex.dossierReunionId = idReunion(p.reunion); }
@@ -3897,7 +4047,8 @@ function initEvents() {
 
 /* ------------------------- Init ------------------------- */
 loadLocal();
-archiverTerminees();
+initSnap(); // cliché de référence pour détecter les modifications élément par élément
+if (!SYNC_ENDPOINT) archiverTerminees(); // avec synchro : l'archivage attend la 1re fusion (syncPull)
 initEvents();
 document.getElementById('print-date').textContent = 'Édité le ' + today0().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 // restaurer zoom / vue / filtres UI
@@ -3955,6 +4106,15 @@ document.addEventListener('visibilitychange', () => {
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+// filet de sécurité : une synchro en attente part quand même si on ferme/quitte l'appli
+// (sendBeacon : envoi garanti par le navigateur même pendant la fermeture de la page)
+window.addEventListener('pagehide', () => {
+  if (SYNC_ENDPOINT && syncTimer) {
+    clearTimeout(syncTimer); syncTimer = null;
+    try { navigator.sendBeacon(SYNC_ENDPOINT, new Blob([JSON.stringify({ action: 'save', state: state })], { type: 'text/plain' })); } catch (e) {}
+  }
+});
 
 // lancement direct en mode voiture : index.html?voiture=1
 // (raccourci « 🚗 Mode voiture » du manifest, ou « OK Google, ouvre Planning HSE » puis appui long sur l'icône)
